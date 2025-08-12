@@ -1,0 +1,588 @@
+---
+# Following bootstrap-phase2.sh order EXACTLY - all in one role
+
+- name: Check if CentOS ISO exists
+  stat:
+    path: /isos/{{ centos_iso }}
+  register: centos_iso_file
+  failed_when: not centos_iso_file.stat.exists
+
+# =================================
+# SETUP ROOT ENVIRONMENT & CERTIFICATES (from bootstrap)
+# =================================
+
+- name: Ensure xcatd daemon is running
+  systemd:
+    name: xcatd
+    state: restarted
+    enabled: yes
+
+- name: Wait for xcatd daemon to be ready
+  wait_for:
+    port: 3001
+    host: 127.0.0.1
+    delay: 10
+    timeout: 60
+
+- name: Setup xCAT client certificates with expect
+  expect:
+    command: /opt/xcat/share/xcat/scripts/setup-local-client.sh root
+    responses:
+      "Sign the certificate.*": "y"
+      "delete and start over.*": "y"
+      "commit.*": "y"
+    timeout: 60
+  failed_when: false
+
+- name: Test xCAT connection
+  shell: |
+    . /etc/profile.d/xcat.sh
+    /opt/xcat/bin/lsdef -t site
+  register: xcat_test
+  failed_when: false
+
+- name: Alternative certificate setup if needed
+  shell: |
+    echo -e "y\ny\n" | /opt/xcat/share/xcat/scripts/setup-local-client.sh root || true
+  when: xcat_test.rc != 0
+
+# =================================
+# NETWORK CONFIGURATION (from bootstrap)
+# =================================
+
+- name: Configure xCAT site settings
+  shell: |
+    . /etc/profile.d/xcat.sh
+    /opt/xcat/bin/chdef -t site {{ item }}
+  loop:
+    - "dhcpinterfaces={{ network_interface }}"
+    - "domain=local"
+    - "nameservers={{ management_ip }}"
+    - "useipv6=0"
+    - "dhcpsetup=1"
+
+- name: Aggressive IPv6 and problematic network cleanup
+  shell: |
+    . /etc/profile.d/xcat.sh
+    /opt/xcat/bin/rmdef -t network "{{ item }}" 2>/dev/null || true
+  loop:
+    - "fd17:625c:f037:2::/64"
+    - "10_0_2_0-255_255_255_0"
+
+- name: Remove all unwanted networks
+  shell: |
+    . /etc/profile.d/xcat.sh
+    /opt/xcat/bin/lsdef -t network | while read net_line; do
+      net_name=$(echo "$net_line" | awk '{print $1}')
+      if [[ "$net_name" != "192_168_56_0-255_255_255_0" ]] && [[ "$net_name" != "" ]]; then
+        echo "Removing unwanted network: $net_name"
+        /opt/xcat/bin/rmdef -t network "$net_name" 2>/dev/null || true
+      fi
+    done
+
+- name: Ensure our network configuration
+  shell: |
+    . /etc/profile.d/xcat.sh
+    if ! /opt/xcat/bin/lsdef -t network 192_168_56_0-255_255_255_0 >/dev/null 2>&1; then
+      echo "Creating our IPv4 network..."
+      /opt/xcat/bin/mkdef -t network -o 192_168_56_0-255_255_255_0 \
+        net={{ management_network }} mask={{ management_netmask }} gateway={{ management_gateway }}
+    fi
+
+# =================================
+# IMPORT ISO TO XCAT (from bootstrap)
+# =================================
+
+- name: Check if OS image already imported
+  shell: |
+    . /etc/profile.d/xcat.sh
+    /opt/xcat/bin/lsdef -t osimage | grep -q "centos7.8-x86_64-netboot-compute"
+  register: os_image_check
+  failed_when: false
+
+- name: Import CentOS ISO to xCAT
+  shell: |
+    . /etc/profile.d/xcat.sh
+    
+    # Function to find xCAT command location (from bootstrap)
+    find_xcat_cmd() {
+        local cmd="$1"
+        if [ -f "/opt/xcat/bin/$cmd" ]; then
+            echo "/opt/xcat/bin/$cmd"
+        elif [ -f "/opt/xcat/sbin/$cmd" ]; then
+            echo "/opt/xcat/sbin/$cmd"
+        elif command -v "$cmd" >/dev/null 2>&1; then
+            which "$cmd"
+        else
+            echo ""
+        fi
+    }
+    
+    COPYCDS_CMD=$(find_xcat_cmd copycds)
+    if [ -n "$COPYCDS_CMD" ]; then
+        $COPYCDS_CMD /isos/{{ centos_iso }}
+    else
+        echo "❌ copycds command not found"
+        exit 1
+    fi
+  when: os_image_check.rc != 0
+
+# =================================
+# NETWORK SERVICES INITIALIZATION (from bootstrap)
+# =================================
+
+- name: Initialize network services
+  shell: |
+    . /etc/profile.d/xcat.sh
+    
+    # Function to find xCAT command location (from bootstrap)
+    find_xcat_cmd() {
+        local cmd="$1"
+        if [ -f "/opt/xcat/bin/$cmd" ]; then
+            echo "/opt/xcat/bin/$cmd"
+        elif [ -f "/opt/xcat/sbin/$cmd" ]; then
+            echo "/opt/xcat/sbin/$cmd"
+        elif command -v "$cmd" >/dev/null 2>&1; then
+            which "$cmd"
+        else
+            echo ""
+        fi
+    }
+    
+    MAKENETWORKS_CMD=$(find_xcat_cmd makenetworks)
+    if [ -n "$MAKENETWORKS_CMD" ]; then
+        echo "Creating networks (ignoring existing network warnings)..."
+        $MAKENETWORKS_CMD 2>&1 | grep -v "already exists" || true
+    else
+        echo "❌ makenetworks command not found"
+        exit 1
+    fi
+
+- name: Configure DNS
+  shell: |
+    . /etc/profile.d/xcat.sh
+    
+    # Function to find xCAT command location (from bootstrap)
+    find_xcat_cmd() {
+        local cmd="$1"
+        if [ -f "/opt/xcat/bin/$cmd" ]; then
+            echo "/opt/xcat/bin/$cmd"
+        elif [ -f "/opt/xcat/sbin/$cmd" ]; then
+            echo "/opt/xcat/sbin/$cmd"
+        elif command -v "$cmd" >/dev/null 2>&1; then
+            which "$cmd"
+        else
+            echo ""
+        fi
+    }
+    
+    MAKEDNS_CMD=$(find_xcat_cmd makedns)
+    if [ -n "$MAKEDNS_CMD" ]; then
+        echo "Configuring DNS..."
+        $MAKEDNS_CMD -n
+    else
+        echo "❌ makedns command not found"
+        exit 1
+    fi
+
+- name: Configure DHCP range
+  shell: |
+    . /etc/profile.d/xcat.sh
+    /opt/xcat/bin/chdef -t network 192_168_56_0-255_255_255_0 \
+      dynamicrange="{{ dhcp_range_start }}-{{ dhcp_range_end }}" \
+      nameservers={{ management_ip }}
+
+# =================================
+# OS IMAGE GENERATION (from bootstrap)
+# =================================
+
+- name: Generate OS image for compute nodes
+  shell: |
+    . /etc/profile.d/xcat.sh
+    
+    if [ -d "/install/netboot/centos7.8/x86_64/compute" ] && [ -f "/install/netboot/centos7.8/x86_64/compute/kernel" ]; then
+      echo "✅ OS image already generated, skipping"
+    else
+      echo "Generating OS image for compute nodes..."
+      
+      # Function to find xCAT command location (from bootstrap)
+      find_xcat_cmd() {
+          local cmd="$1"
+          if [ -f "/opt/xcat/bin/$cmd" ]; then
+              echo "/opt/xcat/bin/$cmd"
+          elif [ -f "/opt/xcat/sbin/$cmd" ]; then
+              echo "/opt/xcat/sbin/$cmd"
+          elif command -v "$cmd" >/dev/null 2>&1; then
+              which "$cmd"
+          else
+              echo ""
+          fi
+      }
+      
+      GENIMAGE_CMD=$(find_xcat_cmd genimage)
+      PACKIMAGE_CMD=$(find_xcat_cmd packimage)
+      
+      if [ -n "$GENIMAGE_CMD" ]; then
+          $GENIMAGE_CMD centos7.8-x86_64-netboot-compute
+      else
+          echo "❌ genimage command not found"
+          exit 1
+      fi
+      
+      if [ -n "$PACKIMAGE_CMD" ]; then
+          $PACKIMAGE_CMD centos7.8-x86_64-netboot-compute
+      else
+          echo "❌ packimage command not found"
+          exit 1
+      fi
+      
+      if [ -f "/install/netboot/centos7.8/x86_64/compute/kernel" ]; then
+        echo "✅ OS image generation successful"
+      else
+        echo "❌ OS image generation failed"
+        exit 1
+      fi
+    fi
+
+# =================================
+# DEFINE COMPUTE NODE (from bootstrap)
+# =================================
+
+- name: Check if compute node exists
+  shell: |
+    . /etc/profile.d/xcat.sh
+    /opt/xcat/bin/lsdef {{ node_name }}
+  register: node_check
+  failed_when: false
+
+- name: Define compute node
+  shell: |
+    . /etc/profile.d/xcat.sh
+    /opt/xcat/bin/mkdef {{ node_name }} groups=compute,all \
+      ip={{ compute_ip }} mac={{ compute_mac }} \
+      netboot=xnba arch=x86_64 \
+      installnic={{ network_interface }} \
+      primarynic={{ network_interface }}
+  when: node_check.rc != 0
+
+- name: Set provisioning method
+  shell: |
+    . /etc/profile.d/xcat.sh
+    /opt/xcat/bin/chdef {{ node_name }} provmethod=centos7.8-x86_64-netboot-compute
+  when: node_check.rc != 0
+
+- name: Update existing compute node
+  shell: |
+    . /etc/profile.d/xcat.sh
+    /opt/xcat/bin/chdef {{ node_name }} \
+      provmethod=centos7.8-x86_64-netboot-compute \
+      installnic={{ network_interface }} \
+      primarynic={{ network_interface }}
+  when: node_check.rc == 0
+
+# =================================
+# HTTP CONFIGURATION (from bootstrap)
+# =================================
+
+- name: Create HTTP symlinks directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - /var/www/html/tftpboot/xcat/osimage/centos7.8-x86_64-netboot-compute/
+    - /var/www/html/install/netboot/centos7.8/x86_64/compute/
+    - /var/www/html/tftpboot/xcat/xnba/nodes/
+
+- name: Create HTTP symlinks for boot files
+  shell: |
+    if [ ! -L "{{ item.dest }}" ]; then
+      ln -sf {{ item.src }} {{ item.dest }}
+    fi
+  loop:
+    - src: /install/netboot/centos7.8/x86_64/compute/kernel
+      dest: /var/www/html/tftpboot/xcat/osimage/centos7.8-x86_64-netboot-compute/kernel
+    - src: /install/netboot/centos7.8/x86_64/compute/initrd-stateless.gz
+      dest: /var/www/html/tftpboot/xcat/osimage/centos7.8-x86_64-netboot-compute/initrd-stateless.gz
+    - src: /install/netboot/centos7.8/x86_64/compute/rootimg.cpio.gz
+      dest: /var/www/html/install/netboot/centos7.8/x86_64/compute/rootimg.cpio.gz
+
+- name: Create symlink for node-specific boot script
+  shell: |
+    if [ ! -L "/var/www/html/tftpboot/xcat/xnba/nodes/{{ node_name }}" ]; then
+      ln -sf /tftpboot/xcat/xnba/nodes/{{ node_name }} /var/www/html/tftpboot/xcat/xnba/nodes/{{ node_name }}
+    fi
+  ignore_errors: yes
+
+- name: Set web directory permissions
+  file:
+    path: /var/www/html/
+    owner: www-data
+    group: www-data
+    mode: '0755'
+    recurse: yes
+
+- name: Set default node password
+  shell: |
+    . /etc/profile.d/xcat.sh
+    
+    # Function to find xCAT command location (from bootstrap)
+    find_xcat_cmd() {
+        local cmd="$1"
+        if [ -f "/opt/xcat/bin/$cmd" ]; then
+            echo "/opt/xcat/bin/$cmd"
+        elif [ -f "/opt/xcat/sbin/$cmd" ]; then
+            echo "/opt/xcat/sbin/$cmd"
+        elif command -v "$cmd" >/dev/null 2>&1; then
+            which "$cmd"
+        else
+            echo ""
+        fi
+    }
+    
+    # Find chtab command
+    CHTAB_CMD=$(find_xcat_cmd chtab)
+    if [ -n "$CHTAB_CMD" ]; then
+        $CHTAB_CMD key=system passwd.username=root passwd.password={{ default_root_password }}
+        echo "✅ Password set successfully"
+    else
+        echo "❌ chtab command not found"
+        exit 1
+    fi
+  failed_when: false
+
+# =================================
+# FINAL DHCP CONFIGURATION (EXACT BOOTSTRAP ORDER)
+# =================================
+
+- name: Generate initial DHCP configuration (bootstrap order)
+  shell: |
+    . /etc/profile.d/xcat.sh
+    
+    # Function to find xCAT command location (from bootstrap)
+    find_xcat_cmd() {
+        local cmd="$1"
+        if [ -f "/opt/xcat/bin/$cmd" ]; then
+            echo "/opt/xcat/bin/$cmd"
+        elif [ -f "/opt/xcat/sbin/$cmd" ]; then
+            echo "/opt/xcat/sbin/$cmd"
+        elif command -v "$cmd" >/dev/null 2>&1; then
+            which "$cmd"
+        else
+            echo ""
+        fi
+    }
+    
+    echo "Generating initial DHCP configuration..."
+    MAKEDHCP_CMD=$(find_xcat_cmd makedhcp)
+    if [ -n "$MAKEDHCP_CMD" ]; then
+        $MAKEDHCP_CMD -n 2>&1 | grep -v -E "(Could not add the subnet fd|IPv6|vpd.uuid)" || true
+    else
+        echo "❌ makedhcp command not found"
+        exit 1
+    fi
+
+- name: Start DHCP server after configuration (bootstrap order)
+  systemd:
+    name: isc-dhcp-server
+    state: started
+    enabled: yes
+
+- name: Verify DHCP is running and retry if failed (bootstrap logic)
+  shell: |
+    if systemctl is-active --quiet isc-dhcp-server; then
+        echo "✅ DHCP server is running"
+        echo "active"
+    else
+        echo "⚠️ DHCP server may have issues, checking status..."
+        systemctl status isc-dhcp-server --no-pager || true
+        echo "Trying to restart DHCP server..."
+        systemctl restart isc-dhcp-server || true
+        sleep 2
+        if systemctl is-active --quiet isc-dhcp-server; then
+            echo "✅ DHCP server restarted successfully"
+            echo "active"
+        else
+            echo "❌ DHCP server still failed"
+            echo "failed"
+        fi
+    fi
+  register: dhcp_status_check
+
+- name: Display DHCP status before nodeset
+  debug:
+    msg: "DHCP server status: {{ dhcp_status_check.stdout_lines[-1] }}"
+
+- name: Continue only if DHCP is working
+  fail:
+    msg: "DHCP server failed to start - cannot continue with nodeset"
+  when: "'failed' in dhcp_status_check.stdout"
+
+# =================================
+# CRITICAL BOOTSTRAP ORDER FOR STATIC IP ASSIGNMENT
+# =================================
+
+- name: "BOOTSTRAP Step 1 - Set node osimage FIRST"
+  shell: |
+    . /etc/profile.d/xcat.sh
+    
+    # Function to find xCAT command location (from bootstrap)
+    find_xcat_cmd() {
+        local cmd="$1"
+        if [ -f "/opt/xcat/bin/$cmd" ]; then
+            echo "/opt/xcat/bin/$cmd"
+        elif [ -f "/opt/xcat/sbin/$cmd" ]; then
+            echo "/opt/xcat/sbin/$cmd"
+        elif command -v "$cmd" >/dev/null 2>&1; then
+            which "$cmd"
+        else
+            echo ""
+        fi
+    }
+    
+    echo "Removing all problematic networks..."
+    /opt/xcat/bin/rmdef -t network "fd17:625c:f037:2::/64" 2>/dev/null || true
+    /opt/xcat/bin/rmdef -t network "10_0_2_0-255_255_255_0" 2>/dev/null || true
+    echo "Step 1: Setting node osimage..."
+    
+    NODESET_CMD=$(find_xcat_cmd nodeset)
+    if [ -n "$NODESET_CMD" ]; then
+        $NODESET_CMD {{ node_name }} osimage=centos7.8-x86_64-netboot-compute
+    else
+        echo "❌ nodeset command not found"
+        exit 1
+    fi
+
+- name: "BOOTSTRAP Step 2 - Skip duplicate DHCP config (already done above)"
+  shell: |
+    echo "Step 2: DHCP configuration already completed above"
+
+- name: "BOOTSTRAP Step 3 - Add node to DHCP with static IP"
+  shell: |
+    . /etc/profile.d/xcat.sh
+    
+    # Function to find xCAT command location (from bootstrap)
+    find_xcat_cmd() {
+        local cmd="$1"
+        if [ -f "/opt/xcat/bin/$cmd" ]; then
+            echo "/opt/xcat/bin/$cmd"
+        elif [ -f "/opt/xcat/sbin/$cmd" ]; then
+            echo "/opt/xcat/sbin/$cmd"
+        elif command -v "$cmd" >/dev/null 2>&1; then
+            which "$cmd"
+        else
+            echo ""
+        fi
+    }
+    
+    echo "Step 3: Adding node to DHCP with static IP..."
+    MAKEDHCP_CMD=$(find_xcat_cmd makedhcp)
+    if [ -n "$MAKEDHCP_CMD" ]; then
+        $MAKEDHCP_CMD {{ node_name }} 2>&1 | grep -v -E "(Could not add the subnet fd|IPv6|vpd.uuid)" || true
+    else
+        echo "❌ makedhcp command not found"
+        exit 1
+    fi
+
+- name: Update DNS for the node
+  shell: |
+    . /etc/profile.d/xcat.sh
+    
+    # Function to find xCAT command location (from bootstrap)
+    find_xcat_cmd() {
+        local cmd="$1"
+        if [ -f "/opt/xcat/bin/$cmd" ]; then
+            echo "/opt/xcat/bin/$cmd"
+        elif [ -f "/opt/xcat/sbin/$cmd" ]; then
+            echo "/opt/xcat/sbin/$cmd"
+        elif command -v "$cmd" >/dev/null 2>&1; then
+            which "$cmd"
+        else
+            echo ""
+        fi
+    }
+    
+    MAKEHOSTS_CMD=$(find_xcat_cmd makehosts)
+    if [ -n "$MAKEHOSTS_CMD" ]; then
+        $MAKEHOSTS_CMD {{ node_name }}
+    else
+        echo "❌ makehosts command not found"
+        exit 1
+    fi
+
+- name: Restart DHCP server after configuration
+  systemd:
+    name: isc-dhcp-server
+    state: restarted
+
+- name: Start and enable other services
+  systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: yes
+  loop:
+    - apache2
+    - atftpd
+    - bind9
+
+# =================================
+# VERIFICATION (from bootstrap)
+# =================================
+
+- name: Test TFTP
+  shell: |
+    timeout 10 bash -c 'echo -e "binary\nget xcat/xnba.kpxe\nquit" | tftp {{ management_ip }}' && echo "✅ TFTP OK" || echo "❌ TFTP FAILED"
+  ignore_errors: yes
+
+- name: Test HTTP
+  shell: |
+    curl -s -I http://{{ management_ip }}/tftpboot/xcat/osimage/centos7.8-x86_64-netboot-compute/kernel | head -1 | grep -q "200 OK" && echo "✅ HTTP OK" || echo "❌ HTTP FAILED"
+  ignore_errors: yes
+
+- name: Show services status
+  shell: |
+    echo "Service Status:"
+    echo "==============="
+    echo "xcatd: $(systemctl is-active xcatd)"
+    echo "apache2: $(systemctl is-active apache2)"
+    echo "atftpd: $(systemctl is-active atftpd)"
+    echo "isc-dhcp-server: $(systemctl is-active isc-dhcp-server)"
+    echo "bind9: $(systemctl is-active bind9)"
+  register: services_status
+
+- name: Show node configuration
+  shell: |
+    . /etc/profile.d/xcat.sh
+    /opt/xcat/bin/lsdef {{ node_name }}
+  register: node_config
+
+- name: Show network definitions
+  shell: |
+    . /etc/profile.d/xcat.sh
+    /opt/xcat/bin/lsdef -t network
+  register: network_config
+
+- name: Create completion marker
+  shell: echo "XCAT_MANAGEMENT_NODE_READY" > /tmp/setup_complete
+
+- name: Display completion message
+  debug:
+    msg: |
+      🎉 xCAT MANAGEMENT NODE READY! 🎉
+      ========================================
+      ✅ Management Node: {{ management_ip }}
+      ✅ Compute Node: {{ node_name }} ({{ compute_ip }})
+      ✅ Network Interface: {{ network_interface }}
+      ✅ MAC Address: {{ compute_mac }}
+      
+      🚀 READY TO BOOT COMPUTE VM!
+      Boot your VirtualBox VM with MAC: {{ compute_mac }}
+      ========================================
+      
+      {{ services_status.stdout }}
+      
+      Node Configuration:
+      {{ node_config.stdout }}
+      
+      Network Configuration:
+      {{ network_config.stdout }}

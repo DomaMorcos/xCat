@@ -1,0 +1,56 @@
+Vagrant.configure("2") do |config|
+  config.vm.define "xcat-mn" do |mn|
+    mn.vm.box = "ubuntu/bionic64"
+    mn.vm.hostname = "xcat-mn"
+    mn.vm.network "private_network", ip: "192.168.56.10"
+
+    mn.vm.provider :virtualbox do |vb|
+      vb.memory = 4096
+      vb.cpus = 2
+      vb.name = "xcat-management-node"
+    end
+
+    # Remove timeouts
+    mn.vm.boot_timeout = 0
+
+    ## Phase 1: Base xCAT installation (automatic)
+    mn.vm.provision "phase1", type: "ansible" do |ansible|
+      ansible.playbook = "site.yml"
+      ansible.limit = "all"
+      ansible.verbose = "v"
+      ansible.host_vars = {
+        "xcat-mn" => {
+          "ansible_python_interpreter" => "/usr/bin/python3",
+          "ansible_python_version" => "3"
+        }
+      }
+      ansible.extra_vars = {
+        xcat_phase: "phase1",
+        compute_ip: "192.168.56.6",
+        compute_mac: "08:00:27:AB:CD:EF",
+        node_name: "computenode",
+        network_interface: "enp0s8"
+      }
+    end
+
+    # Phase 2: ISO import and final configuration (run manually after copying ISO)
+    mn.vm.provision "phase2", type: "ansible", run: "never" do |ansible|
+      ansible.playbook = "site.yml"
+      ansible.limit = "all"
+      ansible.verbose = "v"
+      ansible.host_vars = {
+        "xcat-mn" => {
+          "ansible_python_interpreter" => "/usr/bin/python3"
+        }
+      }
+      ansible.extra_vars = {
+        xcat_phase: "phase2",
+        compute_ip: "192.168.56.6",
+        compute_mac: "08:00:27:AB:CD:EF",
+        node_name: "computenode",
+        network_interface: "enp0s8",
+        centos_iso: "CentOS-7-x86_64-DVD-2003.iso"
+      }
+    end
+  end
+end

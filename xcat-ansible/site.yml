@@ -1,0 +1,16 @@
+---
+- name: xCAT Management Node Setup
+  hosts: all
+  become: yes
+  vars:
+    xcat_phase: "{{ xcat_phase | default('phase1') }}"
+    
+  roles:
+    - role: system-prep
+      when: xcat_phase == "phase1"
+      
+    - role: xcat-install
+      when: xcat_phase == "phase1"
+      
+    - role: xcat-phase2
+      when: xcat_phase == "phase2"

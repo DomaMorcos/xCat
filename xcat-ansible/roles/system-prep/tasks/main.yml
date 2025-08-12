@@ -1,0 +1,38 @@
+---
+- name: Update system packages
+  apt:
+    update_cache: yes
+    upgrade: dist
+    cache_valid_time: 3600
+
+- name: Install required packages (matching bootstrap-phase1.sh)
+  apt:
+    name:
+      - software-properties-common
+      - wget
+      - curl
+      - yum
+      - rpm
+      - expect
+      - alien
+    state: present
+
+- name: Add Ubuntu repositories
+  apt_repository:
+    repo: "{{ item }}"
+    state: present
+    update_cache: yes
+  loop:
+    - "deb http://archive.ubuntu.com/ubuntu {{ ansible_distribution_release }} main"
+    - "deb http://archive.ubuntu.com/ubuntu {{ ansible_distribution_release }}-updates main"
+    - "deb http://archive.ubuntu.com/ubuntu {{ ansible_distribution_release }} universe"
+    - "deb http://archive.ubuntu.com/ubuntu {{ ansible_distribution_release }}-updates universe"
+
+- name: Create xCAT directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - /home/vagrant/xcat
+    - /isos

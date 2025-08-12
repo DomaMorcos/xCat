@@ -1,0 +1,99 @@
+---
+- name: Check if xcat-core archive exists
+  stat:
+    path: /home/vagrant/xcat/xcat-core-{{ xcat_version }}-ubuntu.tar.bz2
+  register: xcat_core_archive
+
+- name: Download xcat-core
+  get_url:
+    url: "{{ xcat_core_url }}/xcat-core-{{ xcat_version }}-ubuntu.tar.bz2"
+    dest: /home/vagrant/xcat/xcat-core-{{ xcat_version }}-ubuntu.tar.bz2
+    timeout: 300
+  when: not xcat_core_archive.stat.exists
+
+- name: Check if xcat-core directory exists
+  stat:
+    path: /home/vagrant/xcat/xcat-core
+  register: xcat_core_dir
+
+- name: Extract xcat-core
+  unarchive:
+    src: /home/vagrant/xcat/xcat-core-{{ xcat_version }}-ubuntu.tar.bz2
+    dest: /home/vagrant/xcat
+    remote_src: yes
+  when: not xcat_core_dir.stat.exists
+
+- name: Configure xcat-core repository
+  shell: ./mklocalrepo.sh
+  args:
+    chdir: /home/vagrant/xcat/xcat-core
+    creates: /home/vagrant/xcat/xcat-core/dists
+
+- name: Check if xcat-dep archive exists
+  stat:
+    path: /home/vagrant/xcat/xcat-dep-{{ xcat_version }}-ubuntu.tar.bz2
+  register: xcat_dep_archive
+
+- name: Download xcat-dep
+  get_url:
+    url: "{{ xcat_dep_url }}/xcat-dep-{{ xcat_version }}-ubuntu.tar.bz2"
+    dest: /home/vagrant/xcat/xcat-dep-{{ xcat_version }}-ubuntu.tar.bz2
+    timeout: 300
+  when: not xcat_dep_archive.stat.exists
+
+- name: Check if xcat-dep directory exists
+  stat:
+    path: /home/vagrant/xcat/xcat-dep
+  register: xcat_dep_dir
+
+- name: Extract xcat-dep
+  unarchive:
+    src: /home/vagrant/xcat/xcat-dep-{{ xcat_version }}-ubuntu.tar.bz2
+    dest: /home/vagrant/xcat
+    remote_src: yes
+  when: not xcat_dep_dir.stat.exists
+
+- name: Configure xcat-dep repository
+  shell: ./mklocalrepo.sh
+  args:
+    chdir: /home/vagrant/xcat/xcat-dep
+    creates: /home/vagrant/xcat/xcat-dep/dists
+
+- name: Create xCAT repository files
+  copy:
+    content: |
+      deb [arch=amd64 trusted=yes] file:///home/vagrant/xcat/{{ item }} {{ ansible_distribution_release }} main
+    dest: /etc/apt/sources.list.d/{{ item }}.list
+  loop:
+    - xcat-core
+    - xcat-dep
+
+- name: Update package cache
+  apt:
+    update_cache: yes
+
+- name: Install xCAT
+  apt:
+    name: xcat
+    state: present
+
+- name: Fix TFTP configuration
+  lineinfile:
+    path: /etc/default/tftpd-hpa
+    regexp: '^TFTP_DIRECTORY='
+    line: 'TFTP_DIRECTORY="/tftpboot"'
+
+- name: Start and enable xCAT services
+  systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: yes
+  loop:
+    - xcatd
+    - tftpd-hpa
+
+- name: Wait for xCAT daemon
+  wait_for:
+    port: 3001
+    host: localhost
+    timeout: 60

@@ -1,0 +1,23 @@
+---
+# xCAT Configuration
+xcat_version: "2.16.5"
+xcat_core_url: "http://xcat.org/files/xcat/xcat-core/2.16.x_Ubuntu/xcat-core"
+xcat_dep_url: "https://xcat.org/files/xcat/xcat-dep/2.x_Ubuntu"
+
+# Network Configuration
+management_network: "192.168.56.0"
+management_netmask: "255.255.255.0"
+management_gateway: "192.168.56.1"
+management_ip: "192.168.56.10"
+dhcp_range_start: "192.168.56.100"
+dhcp_range_end: "192.168.56.200"
+
+# Default passwords
+default_root_password: "abc123"
+
+# Default compute node (can be overridden by Vagrant extra_vars)
+compute_ip: "192.168.56.6"
+compute_mac: "08:00:27:AB:CD:EF"
+node_name: "computenode"
+network_interface: "enp0s8"
+centos_iso: "CentOS-7-x86_64-DVD-2003.iso"

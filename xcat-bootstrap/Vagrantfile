@@ -1,0 +1,31 @@
+Vagrant.configure("2") do |config|
+  config.vm.define "xcat-mn" do |mn|
+    mn.vm.box = "ubuntu/bionic64"
+    mn.vm.hostname = "xcat-mn"
+    mn.vm.network "private_network", ip: "192.168.56.10"
+
+    mn.vm.provider :virtualbox do |vb|
+      vb.memory = 4096
+      vb.cpus = 2
+    end
+
+    # Remove ALL timeouts - let it run as long as needed
+    mn.vm.boot_timeout = 0  # No boot timeout
+
+    # Phase 1: Everything except ISO download
+    mn.vm.provision "file", source: "bootstrap-phase1.sh", destination: "/tmp/bootstrap-phase1.sh"
+    mn.vm.provision "shell", inline: "chmod +x /tmp/bootstrap-phase1.sh && /tmp/bootstrap-phase1.sh", privileged: true
+
+    # Phase 2: After ISO is copied (run manually)
+    mn.vm.provision "phase2-copy", type: "file", source: "bootstrap-phase2.sh", destination: "/tmp/bootstrap-phase2.sh"
+    mn.vm.provision "phase2-chmod", type: "shell", inline: "chmod +x /tmp/bootstrap-phase2.sh", privileged: true, run: "never"
+
+    # Run Phase 2 as actual root user with proper environment
+    mn.vm.provision "phase2-run", type: "shell", privileged: true, run: "never", inline: <<-SHELL
+chmod +x /opt/xcat/share/xcat/scripts/setup-local-client.sh
+/opt/xcat/share/xcat/scripts/setup-local-client.sh --force root
+su - root -c '/tmp/bootstrap-phase2.sh'
+SHELL
+
+  end
+end
