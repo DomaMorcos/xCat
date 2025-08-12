@@ -40,7 +40,6 @@ Both approaches:
 - **VirtualBox** (latest version recommended)
 - **Vagrant**
 - **(For Ansible version)** Ansible
-- **Host Machine**: 8GB+ RAM, 50GB+ free disk space
 
 ---
 
